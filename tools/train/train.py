@@ -1,0 +1,323 @@
+import os
+import sys
+import time
+import random
+import argparse
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim.lr_scheduler import OneCycleLR
+
+# Add project paths
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(ROOT, "src"))
+
+from config import get_config
+from vocab import Vocab
+from dataset import build_dataloaders
+from model import OCRRecModel
+from utils import compute_accuracy
+
+
+def _fmt_time(seconds: float) -> str:
+    """Format seconds into a human-readable string like '1h 23m 45s'."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
+def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id, log_interval=50):
+    """Train for one epoch. Returns average loss."""
+    model.train()
+    ctc_loss_fn = nn.CTCLoss(blank=blank_id, zero_infinity=True)
+    total_loss = 0.0
+    num_batches = 0
+    total_batches = len(loader)
+    epoch_start = time.time()
+
+    for batch_idx, (x, x_lens, y_cat, y_lens, _) in enumerate(loader):
+        x = x.to(device)
+        y_cat = y_cat.to(device)
+        y_lens = y_lens.to(device)
+
+        logits = model(x)                             # [T, B, V]
+        log_probs = F.log_softmax(logits, dim=-1)
+
+        T = log_probs.size(0)
+        B = log_probs.size(1)
+
+        # CTC input lengths: the model output sequence length for each sample
+        # Since we pad images to max width, all get same T. But we could
+        # compute per-sample T from x_lens if needed for efficiency.
+        # For now: T for all. (safe upper bound)
+        input_lengths = torch.full((B,), T, dtype=torch.long, device=device)
+
+        loss = ctc_loss_fn(log_probs, y_cat, input_lengths, y_lens)
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+
+        total_loss += loss.item()
+        num_batches += 1
+
+        if (batch_idx + 1) % log_interval == 0:
+            avg = total_loss / num_batches
+            lr = optimizer.param_groups[0]['lr']
+            elapsed = time.time() - epoch_start
+            batches_done = batch_idx + 1
+            eta_epoch = (elapsed / batches_done) * (total_batches - batches_done)
+            print(f"  [batch {batches_done:>5d}/{total_batches}] "
+                  f"loss={avg:.4f}  lr={lr:.2e}  "
+                  f"elapsed={_fmt_time(elapsed)}  eta={_fmt_time(eta_epoch)}")
+
+    return total_loss / max(1, num_batches)
+
+
+@torch.no_grad()
+def evaluate(model, loader, vocab, device):
+    """Evaluate on validation set. Returns metrics dict."""
+    model.eval()
+    all_preds = []
+    all_targets = []
+
+    for x, x_lens, y_cat, y_lens, raw_labels in loader:
+        x = x.to(device)
+        logits = model(x)                             # [T, B, V]
+        preds = vocab.ctc_decode_greedy(logits)
+        all_preds.extend(preds)
+        all_targets.extend(raw_labels)
+
+    metrics = compute_accuracy(all_preds, all_targets)
+
+    # Print random sample predictions (mix of correct & wrong)
+    print("  ── Sample predictions ──")
+    n_samples = min(8, len(all_preds))
+    indices = list(range(len(all_preds)))
+    random.shuffle(indices)
+    shown = 0
+    for i in indices:
+        if shown >= n_samples:
+            break
+        status = "✓" if all_preds[i] == all_targets[i] else "✗"
+        print(f"  {status} GT : {all_targets[i]}")
+        print(f"    PRED: {all_preds[i]}")
+        print()
+        shown += 1
+
+    return metrics
+
+
+def save_checkpoint(model, optimizer, scheduler, vocab, epoch, metrics, path, best_cer=None):
+    """Save a training checkpoint."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    payload = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "metrics": metrics,
+        "itos": vocab.itos,
+        "stoi": vocab.stoi,
+    }
+    if scheduler is not None:
+        payload["scheduler_state_dict"] = scheduler.state_dict()
+    if best_cer is not None:
+        payload["best_cer"] = best_cer
+    torch.save(payload, path)
+    print(f"  ✓ Checkpoint saved: {path}")
+
+
+def load_checkpoint(path, model, optimizer=None, scheduler=None):
+    """Load a checkpoint. Returns (epoch, best_cer)."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_state_dict(ckpt["model_state_dict"])
+    if optimizer is not None and "optimizer_state_dict" in ckpt:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    if scheduler is not None and "scheduler_state_dict" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    epoch = ckpt.get("epoch", 0)
+    best_cer = ckpt.get("best_cer", float('inf'))
+    print(f"  ✓ Loaded checkpoint from epoch {epoch}: {path}")
+    if best_cer < float('inf'):
+        print(f"    Best CER so far: {best_cer:.4f}")
+    return epoch, best_cer
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ThaoOCR Training")
+    parser.add_argument("config_pos", nargs="?", default=None, help="Path to YAML config file (positional)")
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
+    parser.add_argument("--train-txt", type=str, default=None, help="Training data file")
+    parser.add_argument("--val-txt", type=str, default=None, help="Validation data file")
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
+    parser.add_argument("--device", type=str, default=None)
+    args = parser.parse_args()
+
+    # ─── Config ───────────────────────────────────────────────
+    config_path = args.config_pos or args.config   # positional takes priority
+    cfg = get_config(config_path)
+    if args.train_txt:
+        cfg.train.train_txt = args.train_txt
+    if args.val_txt:
+        cfg.train.val_txt = args.val_txt
+    if args.epochs:
+        cfg.train.epochs = args.epochs
+    if args.batch_size:
+        cfg.train.batch_size = args.batch_size
+    if args.lr:
+        cfg.train.lr = args.lr
+    if args.resume:
+        cfg.train.resume = args.resume
+    if args.device:
+        cfg.device = args.device
+
+    # Auto-detect device
+    if cfg.device == "cuda" and not torch.cuda.is_available():
+        print("⚠ CUDA not available, falling back to CPU")
+        cfg.device = "cpu"
+    device = torch.device(cfg.device)
+
+    # ─── Vocab ────────────────────────────────────────────────
+    vocab = Vocab(cfg.vocab)
+    print(f"Vocabulary size: {vocab.size}")
+
+    # ─── Data ─────────────────────────────────────────────────
+    print(f"Loading data...")
+    train_loader, val_loader = build_dataloaders(
+        train_txt=cfg.train.train_txt,
+        val_txt=cfg.train.val_txt,
+        vocab=vocab,
+        target_h=cfg.model.target_h,
+        batch_size=cfg.train.batch_size,
+        num_workers=cfg.train.num_workers,
+        pin_memory=cfg.train.pin_memory,
+        data_root=cfg.train.data_root,
+    )
+
+    # ─── Model ────────────────────────────────────────────────
+    model = OCRRecModel.from_config(cfg.model, vocab_size=vocab.size).to(device)
+
+    params = model.count_params()
+    print(f"Model: ThaoNet-{cfg.model.name}")
+    print(f"  Backbone: {cfg.model.backbone.type} {cfg.model.backbone.channels}")
+    print(f"  Neck:     {cfg.model.neck.type}")
+    print(f"  Head:     {cfg.model.head.type} (d={cfg.model.head.d_model}, "
+          f"layers={cfg.model.head.num_layers}, heads={cfg.model.head.nhead})")
+    print(f"  Params:   {params['total_M']:.2f}M ({params['trainable']} trainable)")
+
+    # ─── Optimizer + Scheduler ────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.train.lr,
+        weight_decay=cfg.train.weight_decay,
+    )
+
+    total_steps = cfg.train.epochs * len(train_loader)
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=cfg.train.lr,
+        total_steps=total_steps,
+        pct_start=0.1,
+        anneal_strategy='cos',
+    )
+
+    # ─── Resume ───────────────────────────────────────────────
+    start_epoch = 1
+    best_cer = float('inf')
+    if cfg.train.resume:
+        epoch_loaded, best_cer = load_checkpoint(
+            cfg.train.resume, model, optimizer, scheduler
+        )
+        start_epoch = epoch_loaded + 1
+        print(f"  Resuming from epoch {start_epoch}")
+    os.makedirs(cfg.train.checkpoint_dir, exist_ok=True)
+
+    total_epochs = cfg.train.epochs
+    num_remaining = total_epochs - start_epoch + 1
+
+    print(f"\n{'='*60}")
+    print(f"  ThaoOCR Training")
+    print(f"  Device: {device}")
+    print(f"  Epochs: {start_epoch} → {total_epochs}")
+    print(f"  Batch size: {cfg.train.batch_size}")
+    print(f"  LR: {cfg.train.lr}")
+    print(f"  Batches/epoch: {len(train_loader)}")
+    print(f"{'='*60}\n")
+
+    training_start = time.time()
+    epoch_times = []  # track elapsed time per epoch for ETA
+
+    for epoch in range(start_epoch, total_epochs + 1):
+        t0 = time.time()
+
+        # Train
+        avg_loss = train_one_epoch(
+            model, train_loader, optimizer, scheduler, device,
+            blank_id=vocab.blank_id,
+            log_interval=cfg.train.log_interval,
+        )
+
+        # Evaluate
+        metrics = evaluate(model, val_loader, vocab, device)
+        elapsed = time.time() - t0
+        epoch_times.append(elapsed)
+
+        # Compute ETA
+        avg_epoch_time = sum(epoch_times) / len(epoch_times)
+        epochs_left = total_epochs - epoch
+        eta_remaining = avg_epoch_time * epochs_left
+        total_elapsed = time.time() - training_start
+
+        # Print epoch summary
+        print(f"Epoch {epoch:03d}/{total_epochs} "
+              f"| loss={avg_loss:.4f} "
+              f"| CER={metrics['avg_cer']:.4f} "
+              f"| WER={metrics['avg_wer']:.4f} "
+              f"| exact={metrics['exact_match']:.3f} "
+              f"| epoch={_fmt_time(elapsed)} "
+              f"| total={_fmt_time(total_elapsed)} "
+              f"| ETA={_fmt_time(eta_remaining)}")
+        print()
+
+        # Save best checkpoint
+        if metrics['avg_cer'] < best_cer:
+            best_cer = metrics['avg_cer']
+            save_checkpoint(
+                model, optimizer, scheduler, vocab, epoch, metrics,
+                os.path.join(cfg.train.checkpoint_dir, "best.pt"),
+                best_cer=best_cer,
+            )
+            print(f"  ★ New best CER: {best_cer:.4f}")
+
+        # Always save latest (so you never lose more than 1 epoch)
+        save_checkpoint(
+            model, optimizer, scheduler, vocab, epoch, metrics,
+            os.path.join(cfg.train.checkpoint_dir, "latest.pt"),
+            best_cer=best_cer,
+        )
+
+        # Periodic checkpoint
+        if epoch % cfg.train.save_every == 0:
+            save_checkpoint(
+                model, optimizer, scheduler, vocab, epoch, metrics,
+                os.path.join(cfg.train.checkpoint_dir, f"epoch_{epoch:03d}.pt"),
+                best_cer=best_cer,
+            )
+
+    total_time = time.time() - training_start
+    print(f"\n✓ Training complete! Best CER: {best_cer:.4f} | Total time: {_fmt_time(total_time)}")
+
+
+if __name__ == "__main__":
+    main()
