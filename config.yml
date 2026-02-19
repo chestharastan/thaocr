@@ -1,69 +1,40 @@
-# ─────────────────────────────────────────────────────────────
-# ThaoOCR — Training Configuration
-# ─────────────────────────────────────────────────────────────
-# Usage:
-#   python tools/train/train.py config.yml
-#
-# Only include settings you want to override.
-# Anything omitted will use defaults from config.py.
-# ─────────────────────────────────────────────────────────────
-
 device: "cuda"
 
-# ─── Model: ThaoNet Architecture ─────────────────────────────
-#
-# Pipeline:  Image → [Backbone] → [Neck] → [Head] → Text
-#                      ResNet CNN   Linear   Transformer+CTC
-#
-# Presets: "small" | "base" | "large" | "xlarge"
-#
-#   small  → 32px, d=128, 2 layers,  ~1M params  (fast experiments)
-#   base   → 48px, d=256, 4 layers,  ~8M params  (default)
-#   large  → 48px, d=384, 6 layers, ~20M params  (better accuracy)
-#   xlarge → 64px, d=512, 8 layers, ~45M params  (best accuracy)
-#
 model:
-  name: "base"                           # ← Change this to scale up/down
-  target_h: 64                           # Image height (pixels) - Increased for handwriting details
-  
-  backbone:                              # CNN feature extractor
+  name: "base"
+  target_h: 64
+
+  backbone:
     type: "resnet"
     channels: [64, 128, 256, 256]
-  
-  neck:                                  # Bridge: CNN → Transformer
+
+  neck:
     type: "linear"
     dropout: 0.1
-  
-  head:                                  # Sequence model + classifier
+
+  head:
     type: "transformer_ctc"
     d_model: 256
     nhead: 4
-    num_layers: 2                        # Reduced depth (prevents overfitting on small handwriting datasets)
+    num_layers: 4
     dim_feedforward: 1024
     dropout: 0.1
 
-# ─── Training ────────────────────────────────────────────────
 train:
   epochs: 50
-  batch_size: 64                  # Increased (AMP halves VRAM, fits in 6GB)
+  batch_size: 64
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 5.0
-  num_workers: 8                  # More workers for faster data loading
+  num_workers: 8
   pin_memory: true
 
-  # Data
   data_root: "khmer-ocr-synth-v1"
   train_txt: "khmer-ocr-synth-v1/train.txt"
   val_txt: "khmer-ocr-synth-v1/val.txt"
 
-  # Checkpoints
   checkpoint_dir: "checkpoints"
   save_every: 5
-  # resume: "checkpoints/latest.pt"
-
-  # Logging
   log_interval: 50
 
-  # Augmentation
   aug_enabled: true

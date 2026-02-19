@@ -150,9 +150,9 @@ class ModelConfig:
 @dataclass
 class TrainConfig:
     """Training settings."""
-    epochs: int = 50
-    batch_size: int = 32
-    lr: float = 3e-4
+    epochs: int = None
+    batch_size: int = None
+    lr: float = None
     weight_decay: float = 1e-4
     grad_clip: float = 5.0
     num_workers: int = 4
@@ -160,8 +160,8 @@ class TrainConfig:
 
     # Data paths
     data_root: str = "khmer-ocr-synth-v1"  # Root dir for image paths in txt files
-    train_txt: str = "khmer-ocr-synth-v1/train.txt"
-    val_txt: str = "khmer-ocr-synth-v1/val.txt"
+    train_txt: str = None
+    val_txt: str = None
 
     # Checkpoint
     checkpoint_dir: str = "checkpoints"
@@ -214,30 +214,42 @@ def get_config(yaml_path: str = None) -> Config:
     """
     cfg = Config()
 
-    if yaml_path is not None:
-        import yaml
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            yaml_dict = yaml.safe_load(f) or {}
+    if yaml_path is None:
+        raise ValueError("Error: You MUST provide a config.yml file! Using defaults is disabled.")
+    import yaml
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        yaml_dict = yaml.safe_load(f) or {}
 
-        # Resolve model preset FIRST, then let YAML override individual fields
-        model_dict = yaml_dict.get("model", {})
-        preset_name = model_dict.get("name", cfg.model.name)
-        if preset_name in MODEL_PRESETS:
-            preset = MODEL_PRESETS[preset_name]
-            cfg.model.name = preset_name
-            # Apply preset (target_h is flat, backbone/neck/head are nested)
-            if "target_h" in preset:
-                cfg.model.target_h = preset["target_h"]
-            if "backbone" in preset:
-                _apply_yaml_overrides(cfg.model.backbone, preset["backbone"])
-            if "neck" in preset:
-                _apply_yaml_overrides(cfg.model.neck, preset["neck"])
-            if "head" in preset:
-                _apply_yaml_overrides(cfg.model.head, preset["head"])
-        elif preset_name != "base":
-            print(f"⚠ Unknown model preset: '{preset_name}' — "
-                  f"available: {list(MODEL_PRESETS.keys())}")
+    # Resolve model preset FIRST, then let YAML override individual fields
+    model_dict = yaml_dict.get("model", {})
+    preset_name = model_dict.get("name", cfg.model.name)
+    if preset_name in MODEL_PRESETS:
+        preset = MODEL_PRESETS[preset_name]
+        cfg.model.name = preset_name
+        # Apply preset (target_h is flat, backbone/neck/head are nested)
+        if "target_h" in preset:
+            cfg.model.target_h = preset["target_h"]
+        if "backbone" in preset:
+            _apply_yaml_overrides(cfg.model.backbone, preset["backbone"])
+        if "neck" in preset:
+            _apply_yaml_overrides(cfg.model.neck, preset["neck"])
+        if "head" in preset:
+            _apply_yaml_overrides(cfg.model.head, preset["head"])
+    elif preset_name != "base":
+        print(f"⚠ Unknown model preset: '{preset_name}' — "
+              f"available: {list(MODEL_PRESETS.keys())}")
 
-        _apply_yaml_overrides(cfg, yaml_dict)
+    _apply_yaml_overrides(cfg, yaml_dict)
+
+    # Validation: Ensure required fields are set
+    missing = []
+    if cfg.train.epochs is None: missing.append("train.epochs")
+    if cfg.train.batch_size is None: missing.append("train.batch_size")
+    if cfg.train.lr is None: missing.append("train.lr")
+    if cfg.train.train_txt is None: missing.append("train.train_txt")
+    if cfg.train.val_txt is None: missing.append("train.val_txt")
+
+    if missing:
+        raise ValueError(f"Missing required config fields: {missing}. Please set them in config.yml")
 
     return cfg
