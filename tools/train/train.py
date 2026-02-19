@@ -32,7 +32,7 @@ def _fmt_time(seconds: float) -> str:
 
 
 def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
-                    log_interval=50, scaler=None):
+                    log_interval=50, scaler=None, total_epochs=1, current_epoch=1):
     """Train for one epoch. Returns average loss."""
     model.train()
     ctc_loss_fn = nn.CTCLoss(blank=blank_id, zero_infinity=True)
@@ -81,9 +81,20 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
             elapsed = time.time() - epoch_start
             batches_done = batch_idx + 1
             eta_epoch = (elapsed / batches_done) * (total_batches - batches_done)
+            
+            avg_batch_time = elapsed / batches_done
+            
+            # --- ETA Total (All Epochs) ---
+            batches_per_epoch = total_batches
+            remaining_batches_current_epoch = batches_per_epoch - batches_done
+            future_epochs = total_epochs - current_epoch
+            total_remaining_batches = remaining_batches_current_epoch + (future_epochs * batches_per_epoch)
+            
+            eta_total = avg_batch_time * total_remaining_batches
+
             print(f"  [batch {batches_done:>5d}/{total_batches}] "
                   f"loss={avg:.4f}  lr={lr:.2e}  "
-                  f"elapsed={_fmt_time(elapsed)}  eta={_fmt_time(eta_epoch)}")
+                  f"elapsed={_fmt_time(elapsed)}  eta_epoch={_fmt_time(eta_epoch)}  eta_total={_fmt_time(eta_total)}")
 
     return total_loss / max(1, num_batches)
 
@@ -289,6 +300,36 @@ def main():
     print(f"  Batch size: {cfg.train.batch_size}")
     print(f"  LR: {cfg.train.lr}")
     print(f"  Batches/epoch: {len(train_loader)}")
+    print(f"  Total Steps: {total_steps}")
+    
+    # --- Benchmark Speed ---
+    print("  Benchmarking speed (50 batches)...", end="", flush=True)
+    model.train()
+    t0 = time.time()
+    for i, (x, x_lens, y_cat, y_lens, _) in enumerate(train_loader):
+        if i >= 50: break
+        x = x.to(device)
+        y_cat = y_cat.to(device)
+        y_lens = y_lens.to(device)
+        optimizer.zero_grad()
+        with torch.amp.autocast("cuda", enabled=use_amp):
+             logits = model(x)
+             loss = F.ctc_loss(F.log_softmax(logits, dim=-1), y_cat, 
+                               torch.full((logits.size(1),), logits.size(0), dtype=torch.long, device=device), 
+                               y_lens, zero_infinity=True)
+        if scaler:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+    
+    dt = time.time() - t0
+    avg_batch_time = dt / 50
+    estimated_total_seconds = avg_batch_time * total_steps
+    print(f" Done! ({avg_batch_time*1000:.1f}ms/batch)")
+    print(f"  Est. Total Time: {_fmt_time(estimated_total_seconds)}")
     print(f"{'='*60}\n")
 
     training_start = time.time()
@@ -298,12 +339,13 @@ def main():
         for epoch in range(start_epoch, total_epochs + 1):
             t0 = time.time()
 
-            # Train
             avg_loss = train_one_epoch(
                 model, train_loader, optimizer, scheduler, device,
                 blank_id=vocab.blank_id,
                 log_interval=cfg.train.log_interval,
                 scaler=scaler,
+                total_epochs=total_epochs,
+                current_epoch=epoch,
             )
 
             # Evaluate

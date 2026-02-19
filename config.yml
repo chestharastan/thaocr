@@ -1,7 +1,7 @@
 device: "cuda"
 
 model:
-  name: "base"
+  name: "small"
   target_h: 64
 
   backbone:
