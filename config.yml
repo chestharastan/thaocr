@@ -23,7 +23,7 @@ device: "cuda"
 #   xlarge → 64px, d=512, 8 layers, ~45M params  (best accuracy)
 #
 model:
-  name: "base"                           # ← Change this to scale up/down
+  name: "large"                           # ← Change this to scale up/down
   # target_h: 48                         # Image height (pixels)
   #
   # backbone:                            # CNN feature extractor
@@ -45,11 +45,11 @@ model:
 # ─── Training ────────────────────────────────────────────────
 train:
   epochs: 50
-  batch_size: 32
+  batch_size: 64                  # Increased (AMP halves VRAM, fits in 6GB)
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 5.0
-  num_workers: 4
+  num_workers: 8                  # More workers for faster data loading
   pin_memory: true
 
   # Data

@@ -44,6 +44,7 @@ def predict_single(model, vocab, image_path: str, device, use_beam=False, beam_w
 def main():
     parser = argparse.ArgumentParser(description="ThaoOCR Inference")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
+    parser.add_argument("--config", type=str, default="config.yml", help="Path to config file")
     parser.add_argument("--image", type=str, default=None, help="Path to a single image")
     parser.add_argument("--dir", type=str, default=None, help="Directory of images to predict")
     parser.add_argument("--beam", action="store_true", help="Use beam search")
@@ -60,7 +61,7 @@ def main():
     device = torch.device(args.device)
 
     print(f"Loading model from {args.checkpoint}...")
-    model, vocab = load_model(args.checkpoint, device)
+    model, vocab = load_model(args.checkpoint, device, config_path=args.config)
 
     # Collect images
     images = []

@@ -16,7 +16,7 @@ from config import get_config
 from vocab import Vocab
 from dataset import build_dataloaders
 from model import OCRRecModel
-from utils import compute_accuracy
+from utils import compute_accuracy, preprocess_image
 
 
 def _fmt_time(seconds: float) -> str:
@@ -31,7 +31,8 @@ def _fmt_time(seconds: float) -> str:
     return f"{h}h {m:02d}m {s:02d}s"
 
 
-def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id, log_interval=50):
+def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
+                    log_interval=50, scaler=None):
     """Train for one epoch. Returns average loss."""
     model.train()
     ctc_loss_fn = nn.CTCLoss(blank=blank_id, zero_infinity=True)
@@ -39,30 +40,35 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id, log_i
     num_batches = 0
     total_batches = len(loader)
     epoch_start = time.time()
+    use_amp = scaler is not None
 
     for batch_idx, (x, x_lens, y_cat, y_lens, _) in enumerate(loader):
-        x = x.to(device)
-        y_cat = y_cat.to(device)
-        y_lens = y_lens.to(device)
-
-        logits = model(x)                             # [T, B, V]
-        log_probs = F.log_softmax(logits, dim=-1)
-
-        T = log_probs.size(0)
-        B = log_probs.size(1)
-
-        # CTC input lengths: the model output sequence length for each sample
-        # Since we pad images to max width, all get same T. But we could
-        # compute per-sample T from x_lens if needed for efficiency.
-        # For now: T for all. (safe upper bound)
-        input_lengths = torch.full((B,), T, dtype=torch.long, device=device)
-
-        loss = ctc_loss_fn(log_probs, y_cat, input_lengths, y_lens)
+        x = x.to(device, non_blocking=True)
+        y_cat = y_cat.to(device, non_blocking=True)
+        y_lens = y_lens.to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-        optimizer.step()
+
+        # Forward pass with optional mixed precision
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            logits = model(x)                         # [T, B, V]
+            log_probs = F.log_softmax(logits, dim=-1)
+            T, B = log_probs.size(0), log_probs.size(1)
+            input_lengths = torch.full((B,), T, dtype=torch.long, device=device)
+            loss = ctc_loss_fn(log_probs, y_cat, input_lengths, y_lens)
+
+        # Backward pass with gradient scaling for AMP
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            optimizer.step()
+
         if scheduler is not None:
             scheduler.step()
 
@@ -116,6 +122,30 @@ def evaluate(model, loader, vocab, device):
     return metrics
 
 
+def test_custom_image(model, vocab, image_path, device, target_h=48):
+    """Run inference on a custom image during training."""
+    if not os.path.exists(image_path):
+        print(f"  ⚠ Test image not found: {image_path}")
+        return
+
+    try:
+        # Preprocess using the shared utility
+        x = preprocess_image(image_path, target_h=target_h)
+        x = x.to(device)
+
+        model.eval()
+        with torch.no_grad():
+            logits = model(x)
+            preds = vocab.ctc_decode_greedy(logits)
+
+        print(f"  ── Test Image: {os.path.basename(image_path)} ──")
+        print(f"    PRED: {preds[0]}")
+        print()
+
+    except Exception as e:
+        print(f"  ⚠ Failed to predict on test image: {e}")
+
+
 def save_checkpoint(model, optimizer, scheduler, vocab, epoch, metrics, path, best_cer=None):
     """Save a training checkpoint."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -162,6 +192,7 @@ def main():
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--test-image", type=str, default=None, help="Path to a real image to test after every epoch")
     args = parser.parse_args()
 
     # ─── Config ───────────────────────────────────────────────
@@ -243,12 +274,17 @@ def main():
         print(f"  Resuming from epoch {start_epoch}")
     os.makedirs(cfg.train.checkpoint_dir, exist_ok=True)
 
+    # ─── Mixed Precision (AMP) ────────────────────────────────
+    use_amp = cfg.device == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
     total_epochs = cfg.train.epochs
     num_remaining = total_epochs - start_epoch + 1
 
     print(f"\n{'='*60}")
     print(f"  ThaoOCR Training")
     print(f"  Device: {device}")
+    print(f"  AMP:    {'ON (FP16)' if use_amp else 'OFF'}")
     print(f"  Epochs: {start_epoch} → {total_epochs}")
     print(f"  Batch size: {cfg.train.batch_size}")
     print(f"  LR: {cfg.train.lr}")
@@ -258,65 +294,89 @@ def main():
     training_start = time.time()
     epoch_times = []  # track elapsed time per epoch for ETA
 
-    for epoch in range(start_epoch, total_epochs + 1):
-        t0 = time.time()
+    try:
+        for epoch in range(start_epoch, total_epochs + 1):
+            t0 = time.time()
 
-        # Train
-        avg_loss = train_one_epoch(
-            model, train_loader, optimizer, scheduler, device,
-            blank_id=vocab.blank_id,
-            log_interval=cfg.train.log_interval,
-        )
-
-        # Evaluate
-        metrics = evaluate(model, val_loader, vocab, device)
-        elapsed = time.time() - t0
-        epoch_times.append(elapsed)
-
-        # Compute ETA
-        avg_epoch_time = sum(epoch_times) / len(epoch_times)
-        epochs_left = total_epochs - epoch
-        eta_remaining = avg_epoch_time * epochs_left
-        total_elapsed = time.time() - training_start
-
-        # Print epoch summary
-        print(f"Epoch {epoch:03d}/{total_epochs} "
-              f"| loss={avg_loss:.4f} "
-              f"| CER={metrics['avg_cer']:.4f} "
-              f"| WER={metrics['avg_wer']:.4f} "
-              f"| exact={metrics['exact_match']:.3f} "
-              f"| epoch={_fmt_time(elapsed)} "
-              f"| total={_fmt_time(total_elapsed)} "
-              f"| ETA={_fmt_time(eta_remaining)}")
-        print()
-
-        # Save best checkpoint
-        if metrics['avg_cer'] < best_cer:
-            best_cer = metrics['avg_cer']
-            save_checkpoint(
-                model, optimizer, scheduler, vocab, epoch, metrics,
-                os.path.join(cfg.train.checkpoint_dir, "best.pt"),
-                best_cer=best_cer,
-            )
-            print(f"  ★ New best CER: {best_cer:.4f}")
-
-        # Always save latest (so you never lose more than 1 epoch)
-        save_checkpoint(
-            model, optimizer, scheduler, vocab, epoch, metrics,
-            os.path.join(cfg.train.checkpoint_dir, "latest.pt"),
-            best_cer=best_cer,
-        )
-
-        # Periodic checkpoint
-        if epoch % cfg.train.save_every == 0:
-            save_checkpoint(
-                model, optimizer, scheduler, vocab, epoch, metrics,
-                os.path.join(cfg.train.checkpoint_dir, f"epoch_{epoch:03d}.pt"),
-                best_cer=best_cer,
+            # Train
+            avg_loss = train_one_epoch(
+                model, train_loader, optimizer, scheduler, device,
+                blank_id=vocab.blank_id,
+                log_interval=cfg.train.log_interval,
+                scaler=scaler,
             )
 
-    total_time = time.time() - training_start
-    print(f"\n✓ Training complete! Best CER: {best_cer:.4f} | Total time: {_fmt_time(total_time)}")
+            # Evaluate
+            metrics = evaluate(model, val_loader, vocab, device)
+            elapsed = time.time() - t0
+            epoch_times.append(elapsed)
+
+            # Compute ETA
+            avg_epoch_time = sum(epoch_times) / len(epoch_times)
+            epochs_left = total_epochs - epoch
+            eta_remaining = avg_epoch_time * epochs_left
+            total_elapsed = time.time() - training_start
+
+            # Print epoch summary
+            print(f"Epoch {epoch:03d}/{total_epochs} "
+                  f"| loss={avg_loss:.4f} "
+                  f"| CER={metrics['avg_cer']:.4f} "
+                  f"| WER={metrics['avg_wer']:.4f} "
+                  f"| exact={metrics['exact_match']:.3f} "
+                  f"| epoch={_fmt_time(elapsed)} "
+                  f"| total={_fmt_time(total_elapsed)} "
+                  f"| ETA={_fmt_time(eta_remaining)}")
+            print()
+
+            # Test on custom image if provided
+            if args.test_image:
+                test_custom_image(model, vocab, args.test_image, device, cfg.model.target_h)
+
+            # Save best checkpoint
+            if metrics['avg_cer'] < best_cer:
+                best_cer = metrics['avg_cer']
+                save_checkpoint(
+                    model, optimizer, scheduler, vocab, epoch, metrics,
+                    os.path.join(cfg.train.checkpoint_dir, "best.pt"),
+                    best_cer=best_cer,
+                )
+                print(f"  ★ New best CER: {best_cer:.4f}")
+
+            # Always save latest (so you never lose more than 1 epoch)
+            save_checkpoint(
+                model, optimizer, scheduler, vocab, epoch, metrics,
+                os.path.join(cfg.train.checkpoint_dir, "latest.pt"),
+                best_cer=best_cer,
+            )
+
+            # Periodic checkpoint
+            if epoch % cfg.train.save_every == 0:
+                save_checkpoint(
+                    model, optimizer, scheduler, vocab, epoch, metrics,
+                    os.path.join(cfg.train.checkpoint_dir, f"epoch_{epoch:03d}.pt"),
+                    best_cer=best_cer,
+                )
+
+        total_time = time.time() - training_start
+        print(f"\n✓ Training complete! Best CER: {best_cer:.4f} | Total time: {_fmt_time(total_time)}")
+
+    except KeyboardInterrupt:
+        print("\n\n⚠ Training interrupted by user!")
+        print("  Tips: Resume later using '--resume checkpoints/latest.pt'")
+        sys.exit(0)
+
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            print("\n\n❌ CUDA OUT OF MEMORY ERROR")
+            print(f"   Your GPU ({torch.cuda.get_device_name(0)}) ran out of memory.")
+            print(f"   Current batch size: {cfg.train.batch_size}")
+            print("   ACTION: Reduce 'batch_size' in config.yml (try {cfg.train.batch_size // 2})")
+            print("   You can resume training after changing the config.")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            sys.exit(1)
+        else:
+            raise e
 
 
 if __name__ == "__main__":

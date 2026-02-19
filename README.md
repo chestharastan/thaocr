@@ -218,3 +218,6 @@ train/img_001.jpg	ទទួលបាន
 ## License
 
 MIT
+
+
+python tools/train/train.py config.yml --resume checkpoints/best.pt

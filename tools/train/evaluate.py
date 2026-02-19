@@ -23,7 +23,7 @@ from model import OCRRecModel
 from utils import compute_cer, compute_wer
 
 
-def load_model(checkpoint_path: str, device: str = "cpu"):
+def load_model(checkpoint_path: str, device: str = "cpu", config_path: str = "config.yml"):
     """Load model and vocab from checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
@@ -33,7 +33,7 @@ def load_model(checkpoint_path: str, device: str = "cpu"):
         vocab.itos = ckpt["itos"]
         vocab.stoi = {ch: i for i, ch in enumerate(vocab.itos)}
 
-    cfg = get_config()
+    cfg = get_config(config_path)
     # No dropout at inference
     cfg.model.head.dropout = 0.0
     cfg.model.neck.dropout = 0.0
