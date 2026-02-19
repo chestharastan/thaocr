@@ -4,6 +4,9 @@ data/
 
 # ─── Checkpoints ──────────────────────────────────────────────
 checkpoints/
+checkpoints1/
+checkpoints2/
+checkpoints3/
 
 # ─── Python ───────────────────────────────────────────────────
 __pycache__/
@@ -38,3 +41,12 @@ Thumbs.db
 *.log
 wandb/
 runs/
+
+# Input
+input/
+khmer-ocr-synth-v1/
+khmer-synth14/
+
+# premodel
+model9k/
+model90k/

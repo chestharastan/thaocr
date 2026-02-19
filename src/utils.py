@@ -137,7 +137,8 @@ def compute_wer(pred: str, target: str) -> float:
     target_words = target.split()
     if len(target_words) == 0:
         return 0.0 if len(pred_words) == 0 else 1.0
-    return edit_distance(" ".join(pred_words), " ".join(target_words)) / len(target_words)
+    # Standard WER compares lists of words, not the joint string
+    return edit_distance(pred_words, target_words) / len(target_words)
 
 
 def compute_accuracy(preds: list, targets: list) -> dict:

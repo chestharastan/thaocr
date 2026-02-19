@@ -24,9 +24,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "train"))
 from evaluate import load_model
 
 
-def predict_single(model, vocab, image_path: str, device, use_beam=False, beam_width=10):
+def predict_single(model, vocab, image_path: str, device, cfg, use_beam=False, beam_width=10):
     """Predict text from a single image."""
-    cfg = get_config()
     x = preprocess_image(image_path, target_h=cfg.model.target_h)
     x = x.to(device)
 
@@ -61,6 +60,8 @@ def main():
     device = torch.device(args.device)
 
     print(f"Loading model from {args.checkpoint}...")
+    # Load config first to pass to load_model and predict_single
+    cfg = get_config(args.config)
     model, vocab = load_model(args.checkpoint, device, config_path=args.config)
 
     # Collect images
@@ -76,7 +77,7 @@ def main():
     results = []
     for img_path in images:
         try:
-            text = predict_single(model, vocab, img_path, device, args.beam, args.beam_width)
+            text = predict_single(model, vocab, img_path, device, cfg, args.beam, args.beam_width)
             print(f"{os.path.basename(img_path):>40s}  →  {text}")
             results.append((img_path, text))
         except Exception as e:

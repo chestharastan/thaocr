@@ -78,13 +78,66 @@ def export_onnx(checkpoint_path: str, output_path: str, target_h: int = 48, samp
 
 def main():
     parser = argparse.ArgumentParser(description="ThaoOCR Export to ONNX")
+    parser.add_argument("config_pos", nargs="?", default=None, help="Path to YAML config file (positional)")
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
     parser.add_argument("--output", type=str, default="model.onnx", help="Output ONNX path")
-    parser.add_argument("--width", type=int, default=256, help="Sample width for tracing")
+    parser.add_argument("--width", type=int, default=1024, help="Sample width for tracing")
     args = parser.parse_args()
 
-    cfg = get_config()
-    export_onnx(args.checkpoint, args.output, target_h=cfg.model.target_h, sample_width=args.width)
+    config_path = args.config_pos or args.config or "config.yml"
+    cfg = get_config(config_path)
+
+    print(f"Using config: {config_path} (target_h={cfg.model.target_h})")
+    
+    # Pass the same config_path to load_model so it builds the correct architecture
+    print(f"Loading model from {args.checkpoint}...")
+    from evaluate import load_model
+    model, vocab = load_model(args.checkpoint, device="cpu", config_path=config_path)
+    model.eval()
+
+    # Create dummy input based on config height
+    dummy_input = torch.randn(1, 1, cfg.model.target_h, args.width)
+
+    print(f"Exporting to ONNX: {args.output} (Opset 17)")
+    
+    # We use a dummy input, but dynamic_axes tells ONNX that the width can change
+    torch.onnx.export(
+        model,
+        dummy_input,
+        args.output,
+        opset_version=17,              # Higher opset is generally better for Transformers
+        do_constant_folding=True,
+        input_names=["image"],
+        output_names=["logits"],
+        dynamic_axes={
+            "image": {0: "batch", 3: "width"},
+            "logits": {0: "time", 1: "batch"},
+        },
+    )
+
+    # Save vocab alongside for inference
+    vocab_path = args.output.replace(".onnx", "_vocab.json")
+    import json
+    with open(vocab_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "itos": vocab.itos,
+            "blank_id": vocab.blank_id,
+        }, f, ensure_ascii=False, indent=2)
+
+    print(f"✓ ONNX model saved: {args.output}")
+    print(f"✓ Vocab saved: {vocab_path}")
+
+    # Verify
+    try:
+        import onnx
+        onnx_model = onnx.load(args.output)
+        onnx.checker.check_model(onnx_model)
+        print(f"✓ ONNX model verification passed")
+    except ImportError:
+        print("⚠ Install `onnx` package to verify the exported model")
+    except Exception as e:
+        print(f"⚠ ONNX verification warning: {e}")
 
 
 if __name__ == "__main__":

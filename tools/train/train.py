@@ -367,7 +367,7 @@ def main():
 
     except RuntimeError as e:
         if "out of memory" in str(e):
-            print("\n\n❌ CUDA OUT OF MEMORY ERROR")
+            print("\n\nCUDA OUT OF MEMORY ERROR")
             print(f"   Your GPU ({torch.cuda.get_device_name(0)}) ran out of memory.")
             print(f"   Current batch size: {cfg.train.batch_size}")
             print("   ACTION: Reduce 'batch_size' in config.yml (try {cfg.train.batch_size // 2})")

@@ -23,24 +23,24 @@ device: "cuda"
 #   xlarge → 64px, d=512, 8 layers, ~45M params  (best accuracy)
 #
 model:
-  name: "large"                           # ← Change this to scale up/down
-  # target_h: 48                         # Image height (pixels)
-  #
-  # backbone:                            # CNN feature extractor
-  #   type: "resnet"
-  #   channels: [64, 128, 256, 256]
-  #
-  # neck:                                # Bridge: CNN → Transformer
-  #   type: "linear"
-  #   dropout: 0.1
-  #
-  # head:                                # Sequence model + classifier
-  #   type: "transformer_ctc"
-  #   d_model: 256
-  #   nhead: 4
-  #   num_layers: 4
-  #   dim_feedforward: 1024
-  #   dropout: 0.1
+  name: "base"                           # ← Change this to scale up/down
+  target_h: 64                           # Image height (pixels) - Increased for handwriting details
+  
+  backbone:                              # CNN feature extractor
+    type: "resnet"
+    channels: [64, 128, 256, 256]
+  
+  neck:                                  # Bridge: CNN → Transformer
+    type: "linear"
+    dropout: 0.1
+  
+  head:                                  # Sequence model + classifier
+    type: "transformer_ctc"
+    d_model: 256
+    nhead: 4
+    num_layers: 2                        # Reduced depth (prevents overfitting on small handwriting datasets)
+    dim_feedforward: 1024
+    dropout: 0.1
 
 # ─── Training ────────────────────────────────────────────────
 train:
