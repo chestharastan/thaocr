@@ -30,7 +30,6 @@ def _fmt_time(seconds: float) -> str:
     h, m = divmod(m, 60)
     return f"{h}h {m:02d}m {s:02d}s"
 
-
 def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
                     log_interval=50, scaler=None, total_epochs=1, current_epoch=1):
     """Train for one epoch. Returns average loss."""
@@ -158,11 +157,13 @@ def test_custom_image(model, vocab, image_path, device, target_h=48):
 
 
 def save_checkpoint(model, optimizer, scheduler, vocab, epoch, metrics, path, best_cer=None):
-    """Save a training checkpoint."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+
     payload = {
         "epoch": epoch,
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": state_dict,
         "optimizer_state_dict": optimizer.state_dict(),
         "metrics": metrics,
         "itos": vocab.itos,
@@ -172,14 +173,15 @@ def save_checkpoint(model, optimizer, scheduler, vocab, epoch, metrics, path, be
         payload["scheduler_state_dict"] = scheduler.state_dict()
     if best_cer is not None:
         payload["best_cer"] = best_cer
+
     torch.save(payload, path)
     print(f"  ✓ Checkpoint saved: {path}")
-
 
 def load_checkpoint(path, model, optimizer=None, scheduler=None):
     """Load a checkpoint. Returns (epoch, best_cer)."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    target = model.module if isinstance(model, torch.nn.DataParallel) else model
+    target.load_state_dict(ckpt["model_state_dict"])
     if optimizer is not None and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler is not None and "scheduler_state_dict" in ckpt:
@@ -249,6 +251,11 @@ def main():
 
     # ─── Model ────────────────────────────────────────────────
     model = OCRRecModel.from_config(cfg.model, vocab_size=vocab.size).to(device)
+
+    # ✅ Use both GPUs (simple multi-GPU)
+    if device.type == "cuda" and torch.cuda.device_count() > 1:
+        print(f"✅ Using DataParallel on {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
 
     params = model.count_params()
     print(f"Model: ThaoNet-{cfg.model.name}")

@@ -4,7 +4,6 @@ Handles encoding text → tensor IDs and decoding IDs → text.
 """
 import torch
 from typing import List, Optional
-
 from config import VocabConfig
 
 
