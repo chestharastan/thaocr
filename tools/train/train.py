@@ -175,7 +175,7 @@ def save_checkpoint(model, optimizer, scheduler, vocab, epoch, metrics, path, be
         payload["best_cer"] = best_cer
 
     torch.save(payload, path)
-    print(f"  ✓ Checkpoint saved: {path}")
+    print(f"Checkpoint saved: {path}")
 
 def load_checkpoint(path, model, optimizer=None, scheduler=None):
     """Load a checkpoint. Returns (epoch, best_cer)."""
@@ -257,7 +257,8 @@ def main():
         print(f"✅ Using DataParallel on {torch.cuda.device_count()} GPUs")
         model = torch.nn.DataParallel(model)
 
-    params = model.count_params()
+    real_model = model.module if hasattr(model, "module") else model
+    params = real_model.count_params()
     print(f"Model: ThaoNet-{cfg.model.name}")
     print(f"  Backbone: {cfg.model.backbone.type} {cfg.model.backbone.channels}")
     print(f"  Neck:     {cfg.model.neck.type}")
