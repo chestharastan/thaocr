@@ -30,6 +30,43 @@ def _fmt_time(seconds: float) -> str:
     h, m = divmod(m, 60)
     return f"{h}h {m:02d}m {s:02d}s"
 
+
+def _normalize_ctc_logits(logits: torch.Tensor, expected_batch: int) -> torch.Tensor:
+    """
+    Ensure logits are in CTC layout [T, B, V].
+
+    Handles:
+    - standard single-device output [T, B, V]
+    - accidental [B, T, V] layout
+    - DataParallel gather artifact for time-first tensors:
+      [num_devices * T, B_per_device, V] -> [T, B, V]
+    """
+    if logits.dim() != 3:
+        raise RuntimeError(f"Expected 3D logits [T, B, V], got shape={tuple(logits.shape)}")
+
+    # Expected layout already
+    if logits.size(1) == expected_batch:
+        return logits
+
+    # Batch-first [B, T, V] -> [T, B, V]
+    if logits.size(0) == expected_batch:
+        return logits.transpose(0, 1).contiguous()
+
+    # DataParallel gathered time-first tensors along dim=0.
+    # Rebuild by splitting time into per-device chunks and concatenating on batch dim.
+    b_shard = logits.size(1)
+    if b_shard > 0 and expected_batch % b_shard == 0:
+        num_chunks = expected_batch // b_shard
+        if num_chunks > 1 and logits.size(0) % num_chunks == 0:
+            chunks = torch.chunk(logits, num_chunks, dim=0)
+            return torch.cat(chunks, dim=1).contiguous()
+
+    raise RuntimeError(
+        "Unable to align logits for CTC loss. "
+        f"logits shape={tuple(logits.shape)}, expected_batch={expected_batch}."
+    )
+
+
 def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
                     log_interval=50, scaler=None, total_epochs=1, current_epoch=1):
     """Train for one epoch. Returns average loss."""
@@ -51,6 +88,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
         # Forward pass with optional mixed precision
         with torch.amp.autocast("cuda", enabled=use_amp):
             logits = model(x)                         # [T, B, V]
+            logits = _normalize_ctc_logits(logits, expected_batch=y_lens.size(0))
             log_probs = F.log_softmax(logits, dim=-1)
             T, B = log_probs.size(0), log_probs.size(1)
             input_lengths = torch.full((B,), T, dtype=torch.long, device=device)
@@ -252,9 +290,9 @@ def main():
     # ─── Model ────────────────────────────────────────────────
     model = OCRRecModel.from_config(cfg.model, vocab_size=vocab.size).to(device)
 
-    # ✅ Use both GPUs (simple multi-GPU)
+    # Use both GPUs (simple multi-GPU)
     if device.type == "cuda" and torch.cuda.device_count() > 1:
-        print(f"✅ Using DataParallel on {torch.cuda.device_count()} GPUs")
+        print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
         model = torch.nn.DataParallel(model)
 
     real_model = model.module if hasattr(model, "module") else model
@@ -311,20 +349,29 @@ def main():
     print(f"  Total Steps: {total_steps}")
     
     # --- Benchmark Speed ---
-    print("  Benchmarking speed (50 batches)...", end="", flush=True)
+    benchmark_batches = min(50, len(train_loader))
+    print(f"  Benchmarking speed ({benchmark_batches} batches)...", end="", flush=True)
     model.train()
     t0 = time.time()
+    bench_steps = 0
     for i, (x, x_lens, y_cat, y_lens, _) in enumerate(train_loader):
-        if i >= 50: break
+        if i >= benchmark_batches:
+            break
         x = x.to(device)
         y_cat = y_cat.to(device)
         y_lens = y_lens.to(device)
         optimizer.zero_grad()
         with torch.amp.autocast("cuda", enabled=use_amp):
              logits = model(x)
-             loss = F.ctc_loss(F.log_softmax(logits, dim=-1), y_cat, 
-                               torch.full((logits.size(1),), logits.size(0), dtype=torch.long, device=device), 
-                               y_lens, zero_infinity=True)
+             logits = _normalize_ctc_logits(logits, expected_batch=y_lens.size(0))
+             T, B = logits.size(0), logits.size(1)
+             loss = F.ctc_loss(
+                 F.log_softmax(logits, dim=-1),
+                 y_cat,
+                 torch.full((B,), T, dtype=torch.long, device=device),
+                 y_lens,
+                 zero_infinity=True,
+             )
         if scaler:
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -332,9 +379,10 @@ def main():
         else:
             loss.backward()
             optimizer.step()
+        bench_steps += 1
     
     dt = time.time() - t0
-    avg_batch_time = dt / 50
+    avg_batch_time = dt / max(1, bench_steps)
     estimated_total_seconds = avg_batch_time * total_steps
     print(f" Done! ({avg_batch_time*1000:.1f}ms/batch)")
     print(f"  Est. Total Time: {_fmt_time(estimated_total_seconds)}")
