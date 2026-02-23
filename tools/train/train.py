@@ -146,6 +146,7 @@ def evaluate(model, loader, vocab, device):
     for x, x_lens, y_cat, y_lens, raw_labels in loader:
         x = x.to(device)
         logits = model(x)                             # [T, B, V]
+        logits = _normalize_ctc_logits(logits, expected_batch=x.size(0))
         preds = vocab.ctc_decode_greedy(logits)
         all_preds.extend(preds)
         all_targets.extend(raw_labels)
