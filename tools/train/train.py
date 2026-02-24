@@ -355,32 +355,14 @@ def main():
     model.train()
     t0 = time.time()
     bench_steps = 0
-    for i, (x, x_lens, y_cat, y_lens, _) in enumerate(train_loader):
-        if i >= benchmark_batches:
-            break
-        x = x.to(device)
-        y_cat = y_cat.to(device)
-        y_lens = y_lens.to(device)
-        optimizer.zero_grad()
-        with torch.amp.autocast("cuda", enabled=use_amp):
-             logits = model(x)
-             logits = _normalize_ctc_logits(logits, expected_batch=y_lens.size(0))
-             T, B = logits.size(0), logits.size(1)
-             loss = F.ctc_loss(
-                 F.log_softmax(logits, dim=-1),
-                 y_cat,
-                 torch.full((B,), T, dtype=torch.long, device=device),
-                 y_lens,
-                 zero_infinity=True,
-             )
-        if scaler:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
-        bench_steps += 1
+    with torch.no_grad():
+        for i, (x, *_) in enumerate(train_loader):
+            if i >= benchmark_batches:
+                break
+            x = x.to(device)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                model(x)
+            bench_steps += 1
     
     dt = time.time() - t0
     avg_batch_time = dt / max(1, bench_steps)
