@@ -52,3 +52,7 @@ model9k/
 model90k/
 
 outputkaggle/
+
+*.zip
+output100k/
+val.ipynb

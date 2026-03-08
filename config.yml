@@ -27,12 +27,13 @@ train:
   num_workers: 8
   pin_memory: true
 
-  data_root: "khmer-ocr-synth-v1"
-  train_txt: "khmer-ocr-synth-v1/train.txt"
-  val_txt: "khmer-ocr-synth-v1/val.txt"
+  data_root: "/kaggle/input/datasets/thareah/khmer-ocr-synth-v1"
+  train_txt: "/kaggle/input/datasets/thareah/khmer-ocr-synth-v1/train.txt"
+  val_txt: "/kaggle/input/datasets/thareah/khmer-ocr-synth-v1/val.txt"
 
   checkpoint_dir: "checkpoints"
   save_every: 5
   log_interval: 50
 
   aug_enabled: true
+
