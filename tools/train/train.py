@@ -68,8 +68,18 @@ def _normalize_ctc_logits(logits: torch.Tensor, expected_batch: int) -> torch.Te
 
 
 def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
-                    log_interval=50, scaler=None, total_epochs=1, current_epoch=1):
-    """Train for one epoch. Returns average loss."""
+                    log_interval=50, scaler=None, total_epochs=1, current_epoch=1,
+                    grad_accum_steps=1, grad_clip=5.0):
+    """Train for one epoch with chunk-and-merge gradient accumulation.
+
+    When ``grad_accum_steps`` > 1 the optimizer step is deferred: gradients
+    from *N* consecutive mini-batches (chunks) are accumulated (merged) and a
+    single optimiser step is taken once every *N* batches.  This gives an
+    effective batch size of ``batch_size × grad_accum_steps`` without needing
+    the GPU memory for the larger batch.
+
+    Returns average loss (per mini-batch, *not* per accumulation step).
+    """
     model.train()
     ctc_loss_fn = nn.CTCLoss(blank=blank_id, zero_infinity=True)
     total_loss = 0.0
@@ -78,12 +88,12 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
     epoch_start = time.time()
     use_amp = scaler is not None
 
+    optimizer.zero_grad()  # zero once at the start
+
     for batch_idx, (x, x_lens, y_cat, y_lens, _) in enumerate(loader):
         x = x.to(device, non_blocking=True)
         y_cat = y_cat.to(device, non_blocking=True)
         y_lens = y_lens.to(device, non_blocking=True)
-
-        optimizer.zero_grad()
 
         # Forward pass with optional mixed precision
         with torch.amp.autocast("cuda", enabled=use_amp):
@@ -93,24 +103,36 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
             T, B = log_probs.size(0), log_probs.size(1)
             input_lengths = torch.full((B,), T, dtype=torch.long, device=device)
             loss = ctc_loss_fn(log_probs, y_cat, input_lengths, y_lens)
+            # Scale loss by accumulation steps so merged gradients are averaged
+            loss = loss / grad_accum_steps
 
-        # Backward pass with gradient scaling for AMP
+        # Backward — gradients accumulate in .grad buffers
         if scaler is not None:
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            scaler.step(optimizer)
-            scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            optimizer.step()
 
-        if scheduler is not None:
-            scheduler.step()
-
-        total_loss += loss.item()
+        total_loss += loss.item() * grad_accum_steps  # track unscaled loss
         num_batches += 1
+
+        # --- Merge step: update weights every grad_accum_steps batches ---
+        is_accum_boundary = (batch_idx + 1) % grad_accum_steps == 0
+        is_last_batch = (batch_idx + 1) == total_batches
+
+        if is_accum_boundary or is_last_batch:
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+
+            if scheduler is not None:
+                scheduler.step()
+
+            optimizer.zero_grad()  # reset for next accumulation window
 
         if (batch_idx + 1) % log_interval == 0:
             avg = total_loss / num_batches
@@ -118,15 +140,15 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, blank_id,
             elapsed = time.time() - epoch_start
             batches_done = batch_idx + 1
             eta_epoch = (elapsed / batches_done) * (total_batches - batches_done)
-            
+
             avg_batch_time = elapsed / batches_done
-            
+
             # --- ETA Total (All Epochs) ---
             batches_per_epoch = total_batches
             remaining_batches_current_epoch = batches_per_epoch - batches_done
             future_epochs = total_epochs - current_epoch
             total_remaining_batches = remaining_batches_current_epoch + (future_epochs * batches_per_epoch)
-            
+
             eta_total = avg_batch_time * total_remaining_batches
 
             print(f"  [batch {batches_done:>5d}/{total_batches}] "
@@ -306,13 +328,16 @@ def main():
     print(f"  Params:   {params['total_M']:.2f}M ({params['trainable']} trainable)")
 
     # ─── Optimizer + Scheduler ────────────────────────────────
+    accum_steps = cfg.train.grad_accum_steps
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.train.lr,
         weight_decay=cfg.train.weight_decay,
     )
 
-    total_steps = cfg.train.epochs * len(train_loader)
+    # total_steps = optimizer steps (not mini-batches) for the scheduler
+    steps_per_epoch = -(-len(train_loader) // accum_steps)   # ceil division
+    total_steps = cfg.train.epochs * steps_per_epoch
     scheduler = OneCycleLR(
         optimizer,
         max_lr=cfg.train.lr,
@@ -345,9 +370,13 @@ def main():
     print(f"  AMP:    {'ON (FP16)' if use_amp else 'OFF'}")
     print(f"  Epochs: {start_epoch} → {total_epochs}")
     print(f"  Batch size: {cfg.train.batch_size}")
+    if accum_steps > 1:
+        eff_bs = cfg.train.batch_size * accum_steps
+        print(f"  Grad accumulation: {accum_steps} steps  (effective batch size: {eff_bs})")
     print(f"  LR: {cfg.train.lr}")
     print(f"  Batches/epoch: {len(train_loader)}")
-    print(f"  Total Steps: {total_steps}")
+    print(f"  Optimizer steps/epoch: {steps_per_epoch}")
+    print(f"  Total Optimizer Steps: {total_steps}")
     
     # --- Benchmark Speed ---
     benchmark_batches = min(50, len(train_loader))
@@ -366,7 +395,7 @@ def main():
     
     dt = time.time() - t0
     avg_batch_time = dt / max(1, bench_steps)
-    estimated_total_seconds = avg_batch_time * total_steps
+    estimated_total_seconds = avg_batch_time * (cfg.train.epochs * len(train_loader))
     print(f" Done! ({avg_batch_time*1000:.1f}ms/batch)")
     print(f"  Est. Total Time: {_fmt_time(estimated_total_seconds)}")
     print(f"{'='*60}\n")
@@ -385,6 +414,8 @@ def main():
                 scaler=scaler,
                 total_epochs=total_epochs,
                 current_epoch=epoch,
+                grad_accum_steps=accum_steps,
+                grad_clip=cfg.train.grad_clip,
             )
 
             # Evaluate

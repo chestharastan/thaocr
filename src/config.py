@@ -155,6 +155,7 @@ class TrainConfig:
     lr: float = None
     weight_decay: float = 1e-4
     grad_clip: float = 5.0
+    grad_accum_steps: int = 1          # Gradient accumulation (chunk & merge)
     num_workers: int = 4
     pin_memory: bool = True
 
