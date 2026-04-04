@@ -1,3 +1,33 @@
+"""
+Khmer Printed Text OCR - Synthetic Image Generator
+====================================================
+Input modes
+-----------
+  (A) No --input flag      ->  stream from HuggingFace  (default)
+  (B) --input file.txt     ->  plain UTF-8 text file
+  (C) --input folder/      ->  all .txt files inside folder
+  (D) --input data.csv     ->  CSV  (auto-detect col or set --input_col)
+  (E) --input data.json    ->  JSON array of strings or objects
+  (F) --input data.jsonl   ->  JSON-Lines file
+
+Split modes  (--split_mode)
+---------------------------
+  line   short phrases 3-25 chars  [DEFAULT, best for OCR]
+  word   single Khmer words/tokens
+  both   generate line AND word images in one run
+
+Mixed content  (--inject_mixed)
+--------------------------------
+  Randomly injects English words, Arabic numbers, and Khmer numerals
+  into lines so the model learns to recognise:
+    - spaces between tokens
+    - English letters (A-Z a-z) mixed with Khmer
+    - Arabic digits (0-9) and Khmer digits (០-៩)
+    - common Khmer-news terms  (COVID, km, USD, WHO, GDP …)
+
+Requirements: pip install datasets pillow numpy tqdm
+"""
+
 import argparse, csv, json, random, re, unicodedata
 from pathlib import Path
 import numpy as np

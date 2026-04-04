@@ -16,3 +16,5 @@
   --augment \
   --seed 2024
 ```
+
+/home/thareah/Desktop/TrOCR/thaocr/tools/generateimg/img_generator.py
