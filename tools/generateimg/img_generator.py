@@ -530,7 +530,7 @@ def augment_image(img):
 
 # ── GENERATION LOOP ───────────────────────────────────────
 def generate_dataset(line_samples, word_samples, fonts, output_dir,
-                     num_samples=5000, do_augment=True, do_inject=False,
+                     do_augment=True, do_inject=False,
                      inject_rate=0.4, config=None, seed=42):
     if config is None: config = DEFAULT_CONFIG
     random.seed(seed); np.random.seed(seed)
@@ -547,16 +547,13 @@ def generate_dataset(line_samples, word_samples, fonts, output_dir,
     def _render_batch(samples, level, target):
         nonlocal global_written, global_skipped, next_idx
 
-        actual = min(target, len(samples) * len(fonts))
-        if actual < target:
-            print(f"  {level}-level: capped at {actual:,} "
-                  f"(unique={len(samples)}, combos={len(fonts)})")
-        else:
-            print(f"  {level}-level: {actual:,} images")
+        actual = len(samples) * len(fonts)
+        print(f"  {level}-level: {actual:,} images  "
+              f"({len(samples):,} unique texts × {len(fonts)} font combos)")
 
         pool = [(s, f) for s in samples for f in fonts]
         random.shuffle(pool)
-        pool = pool[:actual]
+        # NO cap — generate every possible (text × font × size) combination
 
         desc = f"  {level}"
         for text, (fname, fsize, font) in tqdm(pool, unit="img", desc=desc):
@@ -589,12 +586,10 @@ def generate_dataset(line_samples, word_samples, fonts, output_dir,
             next_idx += 1
 
     if line_samples:
-        target = num_samples if not word_samples else num_samples // 2
-        _render_batch(line_samples, "line", target)
+        _render_batch(line_samples, "line", None)
 
     if word_samples:
-        target = num_samples if not line_samples else num_samples // 2
-        _render_batch(word_samples, "word", target)
+        _render_batch(word_samples, "word", None)
 
     # ── SAVE LABELS ───────────────────────────────────────
     # labels.txt  — PaddleOCR / Tesseract compatible
@@ -611,16 +606,18 @@ def generate_dataset(line_samples, word_samples, fonts, output_dir,
                 ensure_ascii=False) + "\n")
 
     # metadata
+    total_possible = (len(line_samples) + len(word_samples)) * len(fonts)
     json.dump({
-        "total_images" : global_written,
-        "skipped"      : global_skipped,
-        "augmented"    : do_augment,
-        "inject_mixed" : do_inject,
-        "inject_rate"  : inject_rate if do_inject else 0,
-        "line_samples" : len(line_samples),
-        "word_samples" : len(word_samples),
-        "fonts"        : [{"name": n, "size": s} for n, s, _ in fonts],
-        "seed"         : seed,
+        "total_images"   : global_written,
+        "total_possible" : total_possible,
+        "skipped"        : global_skipped,
+        "augmented"      : do_augment,
+        "inject_mixed"   : do_inject,
+        "inject_rate"    : inject_rate if do_inject else 0,
+        "line_samples"   : len(line_samples),
+        "word_samples"   : len(word_samples),
+        "fonts"          : [{"name": n, "size": s} for n, s, _ in fonts],
+        "seed"           : seed,
     }, open(out / "metadata.json", "w", encoding="utf-8"),
     ensure_ascii=False, indent=2)
 
@@ -697,8 +694,6 @@ Examples
 
     # OUTPUT
     p.add_argument("--output",  default="./khmer_ocr_dataset", metavar="DIR")
-    p.add_argument("--samples", type=int, default=5000, metavar="N",
-        help="Total images to generate.")
 
     # TEXT FILTER
     p.add_argument("--min_len", type=int, default=DEFAULT_CONFIG["min_line_chars"])
@@ -728,10 +723,13 @@ def main():
     print(f"  Max chars   : {args.max_len}  (min: {args.min_len})")
     print(f"  Mixed inject: {'ON  rate=' + str(args.inject_rate) if args.inject_mixed else 'OFF'}")
     print(f"  Fonts       : {len(args.fonts)} file(s)")
-    print(f"  Samples     : {args.samples:,}")
+
     print(f"  Augment     : {args.augment}")
     print(f"  Output      : {args.output}")
     print(f"  Shaping     : {'libraqm (correct Khmer)' if _HAS_RAQM else 'BASIC (broken Khmer!) — install libraqm'}")
+    print("=" * 55)
+    print("  NOTE: no sample limit — ALL (text x font x size)")
+    print("        combinations will be generated.")
     print("=" * 55)
 
     raw = load_input_texts(args.input, args.input_col, args.num_rows)
@@ -752,7 +750,6 @@ def main():
         word_samples = word_samples,
         fonts        = fonts,
         output_dir   = args.output,
-        num_samples  = args.samples,
         do_augment   = args.augment,
         do_inject    = args.inject_mixed,
         inject_rate  = args.inject_rate,
