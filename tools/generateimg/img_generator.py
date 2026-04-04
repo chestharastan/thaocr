@@ -530,7 +530,7 @@ def augment_image(img):
 
 # ── GENERATION LOOP ───────────────────────────────────────
 def generate_dataset(line_samples, word_samples, fonts, output_dir,
-                     do_augment=True, do_inject=False,
+                     num_samples=None, do_augment=True, do_inject=False,
                      inject_rate=0.4, config=None, seed=42):
     if config is None: config = DEFAULT_CONFIG
     random.seed(seed); np.random.seed(seed)
@@ -547,13 +547,21 @@ def generate_dataset(line_samples, word_samples, fonts, output_dir,
     def _render_batch(samples, level, target):
         nonlocal global_written, global_skipped, next_idx
 
-        actual = len(samples) * len(fonts)
-        print(f"  {level}-level: {actual:,} images  "
-              f"({len(samples):,} unique texts × {len(fonts)} font combos)")
+        max_for_level = len(samples) * len(fonts)
+        if num_samples is not None:
+            # split budget evenly between line and word if both active
+            budget = num_samples if not (line_samples and word_samples) else num_samples // 2
+            actual = min(budget, max_for_level)
+            print(f"  {level}-level: {actual:,} images  "
+                  f"(capped at {budget:,} of {max_for_level:,} possible)")
+        else:
+            actual = max_for_level
+            print(f"  {level}-level: {actual:,} images  "
+                  f"({len(samples):,} unique texts × {len(fonts)} font combos — ALL)")
 
         pool = [(s, f) for s in samples for f in fonts]
         random.shuffle(pool)
-        # NO cap — generate every possible (text × font × size) combination
+        pool = pool[:actual]
 
         desc = f"  {level}"
         for text, (fname, fsize, font) in tqdm(pool, unit="img", desc=desc):
@@ -610,6 +618,7 @@ def generate_dataset(line_samples, word_samples, fonts, output_dir,
     json.dump({
         "total_images"   : global_written,
         "total_possible" : total_possible,
+        "sample_cap"     : num_samples if num_samples is not None else "unlimited",
         "skipped"        : global_skipped,
         "augmented"      : do_augment,
         "inject_mixed"   : do_inject,
@@ -694,6 +703,10 @@ Examples
 
     # OUTPUT
     p.add_argument("--output",  default="./khmer_ocr_dataset", metavar="DIR")
+    p.add_argument("--samples", type=int, default=None, metavar="N",
+        help="Max images to generate. Omit to generate ALL possible "
+             "(text × font × size) combinations. "
+             "Example: --samples 500000")
 
     # TEXT FILTER
     p.add_argument("--min_len", type=int, default=DEFAULT_CONFIG["min_line_chars"])
@@ -726,10 +739,8 @@ def main():
 
     print(f"  Augment     : {args.augment}")
     print(f"  Output      : {args.output}")
+    print(f"  Samples     : {args.samples:,} (capped)" if args.samples else "  Samples     : UNLIMITED (all combinations)")
     print(f"  Shaping     : {'libraqm (correct Khmer)' if _HAS_RAQM else 'BASIC (broken Khmer!) — install libraqm'}")
-    print("=" * 55)
-    print("  NOTE: no sample limit — ALL (text x font x size)")
-    print("        combinations will be generated.")
     print("=" * 55)
 
     raw = load_input_texts(args.input, args.input_col, args.num_rows)
@@ -750,6 +761,7 @@ def main():
         word_samples = word_samples,
         fonts        = fonts,
         output_dir   = args.output,
+        num_samples  = args.samples,
         do_augment   = args.augment,
         do_inject    = args.inject_mixed,
         inject_rate  = args.inject_rate,
