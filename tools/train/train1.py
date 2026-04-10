@@ -37,8 +37,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import OneCycleLR
 
-ROOT = Path(__file__).parent
-sys.path.insert(0, str(ROOT / "src"))
+# Support multiple common project layouts:
+#   Layout A (flat):   train.py + src/ in same folder
+#   Layout B (nested): tools/train/train.py, src/ at project root
+#   Layout C (nested): tools/train/train.py, src/ two levels up
+_here = Path(__file__).resolve().parent
+_candidates = [
+    _here / "src",           # Layout A — src next to train.py
+    _here.parent / "src",    # Layout B — one level up
+    _here.parent.parent / "src",  # Layout C — two levels up
+    _here,                   # Layout D — dataset.py in same folder as train.py
+]
+for _p in _candidates:
+    if _p.exists():
+        sys.path.insert(0, str(_p))
+        ROOT = _p.parent
+        break
+else:
+    # Fallback: add all candidate parents so Python can search
+    for _p in _candidates:
+        sys.path.insert(0, str(_p))
+    ROOT = _here
 
 from dataset import Vocab, build_dataloaders
 from model   import KhmerOCRModel
