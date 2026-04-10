@@ -18,7 +18,6 @@ from dataset import build_dataloaders
 from model import OCRRecModel
 from utils import compute_accuracy, preprocess_image
 
-
 def _fmt_time(seconds: float) -> str:
     """Format seconds into a human-readable string like '1h 23m 45s'."""
     s = int(seconds)
