@@ -2,6 +2,7 @@
 ThaoOCR — Vocabulary / Tokenizer
 Handles encoding text → tensor IDs and decoding IDs → text.
 """
+import json
 import torch
 from typing import List, Optional
 from config import VocabConfig
@@ -160,6 +161,57 @@ class Vocab:
             results.append("".join(chars))
 
         return results
+
+    @classmethod
+    def build_from_labels(cls, label_files: List[str]) -> "Vocab":
+        """
+        Build a Vocab by scanning label files for all unique characters.
+
+        Each line in a label file is expected to be:
+            /path/to/image.png<TAB>label text
+
+        Starts from the base VocabConfig and extends with any chars found
+        in the label files that are not already present.
+        """
+        vocab = cls()  # build default vocab from VocabConfig
+        all_chars: set = set()
+        for path in label_files:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.rstrip("\n")
+                    if "\t" in line:
+                        text = line.split("\t", 1)[1]
+                    else:
+                        text = line  # fallback: treat whole line as text
+                    all_chars.update(text)
+        new_chars = "".join(ch for ch in sorted(all_chars) if ch not in vocab.stoi)
+        if new_chars:
+            vocab.extend_vocab(new_chars)
+        return vocab
+
+    def save(self, path: str) -> None:
+        """Save vocabulary to a JSON file."""
+        data = {
+            "blank_token": self.blank_token,
+            "pad_token": self.pad_token,
+            "itos": self.itos,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_file(cls, path: str) -> "Vocab":
+        """Load a previously saved vocabulary from a JSON file."""
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        vocab = cls.__new__(cls)
+        vocab.blank_token = data["blank_token"]
+        vocab.pad_token = data["pad_token"]
+        vocab.itos = data["itos"]
+        vocab.stoi = {ch: i for i, ch in enumerate(vocab.itos)}
+        vocab.blank_id = vocab.stoi[vocab.blank_token]
+        vocab.pad_id = vocab.stoi[vocab.pad_token]
+        return vocab
 
     def extend_vocab(self, new_chars: str):
         """Add new characters to the vocabulary dynamically."""

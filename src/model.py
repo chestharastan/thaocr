@@ -122,9 +122,11 @@ class KhmerOCRModel(nn.Module):
     # ------------------------------------------------------------------
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x      : [B, 3, H, W]
+        x      : [B, 1, H, W] or [B, 3, H, W]
         returns: [T, B, V]   — time-first for CTC loss
         """
+        if x.shape[1] == 1:
+            x = x.expand(-1, 3, -1, -1)  # grayscale → pseudo-RGB
         feat  = self.cnn(x)               # [B, C, H', W']
         feat  = self.pool(feat)           # [B, C,  1, W']
         feat  = feat.squeeze(2)           # [B, C, W']

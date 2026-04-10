@@ -120,20 +120,52 @@ def collate_fn(batch):
     y_lens = torch.tensor([len(y) for y in ys], dtype=torch.long)
     y_cat = torch.cat(ys, dim=0) if any(len(y) > 0 for y in ys) else torch.tensor([], dtype=torch.long)
 
-    return x_pad, x_lens, y_cat, y_lens, raw
+    return x_pad, y_cat, y_lens, raw
 
 
 def build_dataloaders(
-    train_txt: str,
-    val_txt: str,
     vocab: Vocab,
+    train_txt: Optional[str] = None,
+    val_txt: Optional[str] = None,
+    label_file: Optional[str] = None,
+    val_ratio: float = 0.1,
     target_h: int = 48,
     batch_size: int = 32,
     num_workers: int = 4,
     pin_memory: bool = True,
     data_root: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader]:
-    """Build train and validation dataloaders."""
+    """Build train and validation dataloaders.
+
+    Accepts either:
+      - ``train_txt`` + ``val_txt``: pre-split label files
+      - ``label_file`` + ``val_ratio``: single label file split randomly
+    """
+    import random
+
+    if label_file is not None:
+        # Single-file mode: split into train/val by val_ratio
+        with open(label_file, encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines() if l.strip()]
+        random.shuffle(lines)
+        n_val = max(1, int(len(lines) * val_ratio))
+        val_lines   = lines[:n_val]
+        train_lines = lines[n_val:]
+
+        import tempfile, os
+        def _write_tmp(line_list):
+            fd, path = tempfile.mkstemp(suffix=".txt", text=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(line_list))
+            return path
+
+        train_txt = _write_tmp(train_lines)
+        val_txt   = _write_tmp(val_lines)
+        _cleanup   = [train_txt, val_txt]
+    else:
+        if train_txt is None or val_txt is None:
+            raise ValueError("Provide either label_file or both train_txt and val_txt.")
+        _cleanup = []
 
     train_ds = LineRecDataset(
         train_txt, vocab, target_h=target_h, augment=True, data_root=data_root
@@ -141,6 +173,12 @@ def build_dataloaders(
     val_ds = LineRecDataset(
         val_txt, vocab, target_h=target_h, augment=False, data_root=data_root
     )
+
+    for p in _cleanup:
+        try:
+            import os; os.unlink(p)
+        except OSError:
+            pass
 
     train_loader = DataLoader(
         train_ds,

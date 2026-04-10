@@ -1,4 +1,4 @@
-!python train.py \
+!python /tools/train/train1.py \
   --data   ./ocr_data \
   --epochs 50 \
   --batch  64 \
