@@ -296,8 +296,8 @@ Resume after Kaggle timeout
     p.add_argument("--clip",       type=float, default=5.0)
     p.add_argument("--log_every",  type=int,   default=50)
     p.add_argument("--save_every", type=int,   default=5)
-    p.add_argument("--workers",    type=int,   default=2,
-                   help="DataLoader workers per GPU. Default: 2 (safe for Kaggle)")
+    p.add_argument("--workers",    type=int,   default=4,
+                   help="Total DataLoader workers. Default: 4")
     p.add_argument("--seed",       type=int,   default=42)
 
     # Output / resume
@@ -351,7 +351,7 @@ def main():
     # Total batch passed to loader = per-GPU batch x num_gpus
     # DataParallel then slices each GPU's share automatically
     total_batch   = args.batch * n_gpus
-    total_workers = args.workers * n_gpus
+    total_workers = args.workers  # treat as total, not per-GPU
     print(f"\nBuilding data loaders (total batch={total_batch}) ...")
     train_loader, val_loader = build_dataloaders(
         label_file  = str(label_file),
