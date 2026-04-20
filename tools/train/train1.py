@@ -153,6 +153,7 @@ def train_one_epoch(
     model, loader, optimizer, scheduler, device,
     blank_id, scaler, log_interval,
     epoch, total_epochs, grad_clip, accum_steps,
+    mid_epoch_save_fn=None, step_save_every=0,
 ) -> float:
 
     model.train()
@@ -215,6 +216,9 @@ def train_one_epoch(
                   f"elapsed={fmt_time(elapsed)}  "
                   f"eta_epoch={fmt_time(eta_ep)}  "
                   f"eta_total={fmt_time(rem)}")
+
+        if step_save_every > 0 and (step + 1) % step_save_every == 0 and mid_epoch_save_fn:
+            mid_epoch_save_fn(step + 1)
 
     return total_loss / max(1, n_batches)
 
@@ -296,6 +300,8 @@ Resume after Kaggle timeout
     p.add_argument("--clip",       type=float, default=5.0)
     p.add_argument("--log_every",  type=int,   default=50)
     p.add_argument("--save_every", type=int,   default=5)
+    p.add_argument("--step_save", type=int,   default=200,
+                   help="Save mid-epoch checkpoint every N steps. 0 to disable. Default: 200")
     p.add_argument("--workers",    type=int,   default=4,
                    help="Total DataLoader workers. Default: 4")
     p.add_argument("--seed",       type=int,   default=42)
@@ -444,15 +450,23 @@ def main():
             print(f"\n-- Epoch {epoch}/{args.epochs} " + "-"*46)
             t0 = time.time()
 
+            def _mid_save(step):
+                path = os.path.join(args.output, "latest.pt")
+                save_checkpoint(path, model, optimizer, scheduler,
+                                epoch, {}, vocab, best_cer)
+                print(f"  mid-epoch checkpoint saved (step {step})")
+
             avg_loss = train_one_epoch(
                 model, train_loader, optimizer, scheduler, device,
-                blank_id     = vocab.blank_id,
-                scaler       = scaler,
-                log_interval = args.log_every,
-                epoch        = epoch,
-                total_epochs = args.epochs,
-                grad_clip    = args.clip,
-                accum_steps  = accum_steps,
+                blank_id         = vocab.blank_id,
+                scaler           = scaler,
+                log_interval     = args.log_every,
+                epoch            = epoch,
+                total_epochs     = args.epochs,
+                grad_clip        = args.clip,
+                accum_steps      = accum_steps,
+                mid_epoch_save_fn = _mid_save,
+                step_save_every  = args.step_save,
             )
 
             print(f"\n  Evaluating ...")
